@@ -1,0 +1,135 @@
+version: "3.8"
+services:
+  # Orion is the context broker
+  orion:
+    image: fiware/orion:${ORION_VERSION}
+    hostname: orion
+    container_name: fiware-orion
+    depends_on:
+      - mongo-db
+    networks:
+      default:
+        ipv4_address: "${ORION_IP}"
+    expose:
+      - "${ORION_PORT}"
+    ports:
+      - "${ORION_PORT}:${ORION_PORT}" # localhost:1026
+    command: -dbhost mongo-db -corsOrigin __ALL -logLevel DEBUG
+    healthcheck:
+      test: curl --fail -s http://orion:${ORION_PORT}/version || exit 1
+      interval: 5s
+
+  # IoT-Agent is configured for the LoraWan
+  iot-agent:
+    build:
+      context: https://github.com/vitorinojp/IoTagent-LoRaWAN.git#dev/raw_messages
+      args:
+        - GITHUB_ACCOUNT=vitorinojp
+        - GITHUB_REPOSITORY=IoTagent-LoRaWAN
+        - SOURCE_BRANCH=master
+    container_name: fiware-iot-agent
+    depends_on:
+      - mongo-db
+      - orion
+    networks:
+      default:
+        ipv4_address: "${IOTA_IP}"
+    expose:
+      - "${IOTA_NORTH_PORT}"
+    ports:
+      - "${IOTA_NORTH_PORT}:${IOTA_NORTH_PORT}" # localhost:4041
+    environment:
+      - "IOTA_CB_HOST=orion"
+      - "IOTA_CB_PORT=${ORION_PORT}" # port the context broker listens on to update context
+      - "IOTA_NORTH_PORT=${IOTA_NORTH_PORT}"
+      - "IOTA_LOG_LEVEL=DEBUG" # The log level of the IoT Agent
+      - "IOTA_TIMESTAMP=true" # Supply timestamp information with each measurement
+      - "IOTA_CB_NGSI_VERSION=v2"
+      - "IOTA_REGISTRY_TYPE=mongodb"
+      - "IOTA_MONGO_HOST=mongo-db"
+      - "IOTA_MONGO_PORT=${MONGO_DB_PORT}" # The port mongoDB is listening on
+      - "IOTA_MONGO_DB=iotagent-lorawan"
+      - "IOTA_PROVIDER_URL=http://iot-agent:${IOTA_NORTH_PORT}"
+
+
+  cygnus:
+    image: fiware/cygnus-ngsi:${CYGNUS_VERSION}
+    hostname: cygnus
+    container_name: fiware-cygnus
+    depends_on:
+      - mongo-db
+    networks:
+      default:
+        ipv4_address: "${CYGNUS_IP}"
+    expose:
+      - "${CYGNUS_API_PORT}"
+      - "${CYGNUS_MONGO_SERVICE_PORT}"
+    ports:
+      - "${CYGNUS_MONGO_SERVICE_PORT}:${CYGNUS_MONGO_SERVICE_PORT}" # localhost:5051
+      - "${CYGNUS_API_PORT}:${CYGNUS_API_PORT}" # localhost:5080
+    environment:
+      - "CYGNUS_MONGO_SERVICE_PORT=${CYGNUS_MONGO_SERVICE_PORT}" # Port that Cygnus listens on for operational reasons
+      - "CYGNUS_SERVICE_PORT=${CYGNUS_MONGO_SERVICE_PORT}"
+      - "CYGNUS_API_PORT=${CYGNUS_API_PORT}" # Port that Cygnus listens on for operational reasons
+      - "CYGNUS_LOG_LEVEL=DEBUG" # The logging level for Cygnus
+      - "cygnus-ngsi.sources=http-source"
+      - "cygnus-ngsi.sinks=kafka-sink"
+      - "cygnus-ngsi.channels=kafka-channel"
+      - "cygnus-ngsi.sources.http-source.channels=kafka-channel"
+      - "cygnus-ngsi.sources.http-source.type=org.apache.flume.source.http.HTTPSource"
+      - "cygnus-ngsi.sources.http-source.port=5050"
+      - "cygnus-ngsi.sources.http-source.handler=com.telefonica.iot.cygnus.handlers.NGSIRestHandler"
+      - "cygnus-ngsi.sources.http-source.handler.notification_target=/notify"
+      - "cygnus-ngsi.sources.http-source.handler.default_service=def_serv"
+      - "cygnus-ngsi.sources.http-source.handler.default_service_path=/def_servpath"
+      - "cygnus-ngsi.sources.http-source.handler.events_ttl=2"
+      - "cygnus-ngsi.sources.http-source.interceptors=ts gi"
+      - "cygnus-ngsi.sources.http-source.interceptors.ts.type=timestamp"
+      - "cygnus-ngsi.sources.http-source.interceptors.gi.type=com.telefonica.iot.cygnus.interceptors.NGSIGroupingInterceptor$$Builder"
+      - "cygnus-ngsi.channels.kafka-channel.type=memory"
+      - "cygnus-ngsi.channels.kafka-channel.capacity=1000"
+      - "cygnus-ngsi.channels.kafka-channel.trasactionCapacity=100"
+      - "cygnus-ngsi.sinks.kafka-sink.type=com.telefonica.iot.cygnus.sinks.NGSIKafkaSink"
+      - "cygnus-ngsi.sinks.kafka-sink.channel=kafka-channel"
+      - "cygnus-ngsi.sinks.kafka-sink.enable_grouping=false"
+      - "cygnus-ngsi.sinks.kafka-sink.data_model=dm-by-entity"
+      - "cygnus-ngsi.sinks.kafka-sink.broker_list=${KAFKA_ENDPOINT_IP}:{KAFKA_ENDPOINT_PORT}"
+      - "cygnus-ngsi.sinks.kafka-sink.zookeeper_endpoint=${ZOOKEEPER_ENDPOINT_IP}:{ZOOKEEPER_ENDPOINT_PORT}"
+      - "cygnus-ngsi.sinks.kafka-sink.batch_size=1"
+      - "cygnus-ngsi.sinks.kafka-sink.batch_timeout=10"
+    healthcheck:
+      test: curl --fail -s http://cygnus:${CYGNUS_API_PORT}/v1/version || exit 1
+      interval: 5s
+
+  # Database for Orion, IotAgent, Cygnus
+  mongo-db:
+    image: mongo:${MONGO_DB_VERSION}
+    hostname: mongo-db
+    container_name: db-mongo
+    expose:
+      - "${MONGO_DB_PORT}"
+    ports:
+      - "${MONGO_DB_PORT}:${MONGO_DB_PORT}" # localhost:27017
+    command: --bind_ip_all
+    volumes:
+      - mongo-db:/data
+    healthcheck:
+      test: |
+        host=`hostname --ip-address || echo '127.0.0.1'`; 
+        mongo --quiet $$host/test --eval 'quit(db.runCommand({ ping: 1 }).ok ? 0 : 2)' && echo 0 || echo 1    
+      interval: 5s  
+      
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: "${NETWORK_SETTINGS}"
+
+volumes:
+  mongo-db: ~
+  
+secrets:
+  ttn_api_key:
+    file: ./ttn_api_key.txt
+  ttn_app_key:
+    file: ./ttn_app_key.txt
